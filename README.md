@@ -6,36 +6,36 @@
 ![Status](https://img.shields.io/badge/Status-Working-1D9E75?style=flat)
 ![License](https://img.shields.io/badge/License-MIT-blue?style=flat)
 
-> Comment donner à un service AWS l'accès à des ressources dans un autre compte — sans jamais partager de clé d'accès permanente.
+> How to give an AWS service access to resources in another account — without ever sharing a permanent access key.
 
-## Table des matières
+## Table of Contents
 
 - [Architecture](#architecture)
-- [Le flux détaillé](#le-flux-détaillé)
-- [Pourquoi ce projet](#pourquoi-ce-projet)
-- [Comment ça marche](#comment-ça-marche)
-- [Déploiement](#déploiement)
-- [Résultat obtenu](#résultat-obtenu)
-- [Ce que j'ai appris](#ce-que-jai-appris)
+- [The Detailed Flow](#the-detailed-flow)
+- [Why This Project](#why-this-project)
+- [How It Works](#how-it-works)
+- [Deployment](#deployment)
+- [Result](#result)
+- [What I Learned](#what-i-learned)
 - [Sources](#sources)
 
 ## Architecture
 
 ```mermaid
 graph LR
-    API[("🛰️ API ISS<br/>publique")] -->|HTTPS GET| L
+    API[("🛰️ Public ISS<br/>API")] -->|HTTPS GET| L
 
-    subgraph A["Compte A — source"]
+    subgraph A["Account A — source"]
         L["⚡ Lambda<br/>iss-tracker-function"]
     end
 
-    subgraph B["Compte B — cible"]
+    subgraph B["Account B — target"]
         R["🔐 IAM Role<br/>ISSDataWriterRole"]
-        S[("🪣 Bucket S3<br/>iss-tracker-data")]
+        S[("🪣 S3 Bucket<br/>iss-tracker-data")]
     end
 
     L -->|"sts:AssumeRole<br/>+ ExternalId"| R
-    R -->|"s3:PutObject<br/>(scope: ce bucket)"| S
+    R -->|"s3:PutObject<br/>(scoped to this bucket)"| S
 
     style A fill:#e8f0fe,stroke:#4285f4
     style B fill:#e6f4ea,stroke:#34a853
@@ -44,87 +44,89 @@ graph LR
     style S fill:#34a853,color:#fff
 ```
 
-## Le flux détaillé
+## The Detailed Flow
 
-Ce diagramme de séquence montre l'ordre exact des appels et — point clé — le moment où les credentials changent :
+This sequence diagram shows the exact order of calls and — the key point — the moment the credentials change:
 
 ```mermaid
 sequenceDiagram
-    participant API as API ISS
-    participant L as Lambda (Compte A)
+    participant API as ISS API
+    participant L as Lambda (Account A)
     participant STS as AWS STS
-    participant S3 as S3 (Compte B)
+    participant S3 as S3 (Account B)
 
-    L->>API: GET position ISS
+    L->>API: GET ISS position
     API-->>L: JSON (lat/lon)
     L->>STS: AssumeRole(ISSDataWriterRole, ExternalId)
-    STS-->>L: Credentials temporaires (15 min)
-    Note over L: Bascule vers les credentials<br/>du rôle assumé
-    L->>S3: PutObject (avec creds temporaires)
+    STS-->>L: Temporary credentials (15 min)
+    Note over L: Switches to the<br/>assumed role's credentials
+    L->>S3: PutObject (using temporary creds)
     S3-->>L: 200 OK
-    Note over STS,S3: Aucune clé permanente<br/>échangée à aucun moment
+    Note over STS,S3: No permanent key<br/>exchanged at any point
 ```
 
-## Pourquoi ce projet
+## Why This Project
 
-| | 🔴 Clés permanentes (à éviter) | 🟢 STS AssumeRole (ce projet) |
+| | 🔴 Permanent keys (to avoid) | 🟢 STS AssumeRole (this project) |
 |---|---|---|
-| **Durée de vie** | Illimitée jusqu'à révocation manuelle | 15 minutes, expiration automatique |
-| **Exposition en cas de fuite** | Accès total et durable | Fenêtre d'exploitation très courte |
-| **Traçabilité** | Difficile à distinguer par session | Chaque session a un `RoleSessionName` unique, visible dans CloudTrail |
-| **Portée des droits** | Souvent trop large | Scopée précisément par la permissions policy |
+| **Lifetime** | Unlimited until manually revoked | 15 minutes, automatic expiration |
+| **Exposure if leaked** | Full and lasting access | Very short exploitation window |
+| **Traceability** | Hard to distinguish per session | Each session has a unique `RoleSessionName`, visible in CloudTrail |
+| **Scope of access** | Often too broad | Precisely scoped by the permissions policy |
 
-## Comment ça marche
+## How It Works
 
-Le rôle cible (`ISSDataWriterRole`, Compte B) repose sur deux politiques indépendantes :
+The target role (`ISSDataWriterRole`, Account B) relies on two independent policies:
 
-| Politique | Répond à la question | Contenu |
+| Policy | Answers the question | Content |
 |---|---|---|
-| **Trust policy** | Qui a le droit d'endosser ce rôle ? | Seul le Compte A, et seulement avec le bon `ExternalId` (protection contre le "confused deputy problem") |
-| **Permissions policy** | Que peut faire ce rôle une fois endossé ? | Uniquement `s3:PutObject` sur un bucket précis — rien d'autre |
+| **Trust policy** | Who is allowed to assume this role? | Only Account A, and only with the correct `ExternalId` (protection against the "confused deputy problem") |
+| **Permissions policy** | What can this role do once assumed? | Only `s3:PutObject` on one specific bucket — nothing else |
 
-Côté Compte A, la Lambda dispose d'une permission `sts:AssumeRole` scopée à l'ARN exact du rôle cible.
+On the Account A side, the Lambda has an `sts:AssumeRole` permission scoped to the exact ARN of the target role.
 
-## Déploiement
+## Deployment
 
-Prérequis : deux comptes AWS distincts.
+Prerequisites: two separate AWS accounts.
 
-1. **Compte B** — créer le bucket S3, puis le rôle IAM avec les policies fournies dans [`policies/`](policies/) :
+1. **Account B** — create the S3 bucket, then the IAM role using the policies provided in [`policies/`](policies/):
    - `trust_policy_accountB.json`
    - `permissions_policy_accountB.json`
-2. **Compte A** — créer le rôle d'exécution Lambda avec `lambda_execution_policy_accountA.json`.
-3. Déployer [`src/lambda_function.py`](src/lambda_function.py) avec les variables d'environnement `TARGET_ROLE_ARN`, `BUCKET_NAME`, `EXTERNAL_ID`.
-4. Tester dans la console Lambda.
+2. **Account A** — create the Lambda execution role with `lambda_execution_policy_accountA.json`.
+3. Deploy [`src/lambda_function.py`](src/lambda_function.py) with the environment variables `TARGET_ROLE_ARN`, `BUCKET_NAME`, `EXTERNAL_ID`.
+4. Test it from the Lambda console.
 
-Remplacez `<ACCOUNT_A_ID>` et `<ACCOUNT_B_ID>` par vos propres Account ID.
+Replace `<ACCOUNT_A_ID>` and `<ACCOUNT_B_ID>` with your own account IDs.
 
-## Résultat obtenu
+## Result
 
 <table>
 <tr>
 <td width="50%">
 
-**Objet écrit dans S3 (Compte B)**
+**Object written to S3 (Account B)**
 
-![Résultat S3](screenshots/s3-object.png)
+![S3 result](screenshots/s3-object.png)
 
 </td>
 <td width="50%">
 
-**AssumeRole dans CloudTrail (audit)**
+**AssumeRole event in CloudTrail (audit trail)**
 
-![CloudTrail AssumeRole](screenshots/cloudtrail-assumerole.png)
+![CloudTrail AssumeRole](screenshots/cloudtrail-assumerole-table.png)
 
 </td>
 </tr>
 </table>
 
-## Ce que j'ai appris
+The ARN `assumed-role/ISSDataWriterRole/iss-tracker-lambda` confirms the call genuinely came from this project's Lambda function.
 
-- La différence entre une politique de confiance (accès au rôle) et une politique de permissions (capacités du rôle), et pourquoi les deux sont nécessaires indépendamment.
-- Le rôle de `ExternalId` dans la prévention du "confused deputy problem" lors d'un accès cross-compte.
-- Pourquoi des credentials temporaires réduisent la surface d'attaque, même en cas de compromission du code applicatif.
-- Le débogage de politiques IAM à partir de messages d'erreur `AccessDenied`.
+## What I Learned
+
+- The difference between a trust policy (access to the role) and a permissions policy (capabilities of the role), and why both are required independently of each other.
+- The role of the `ExternalId` condition in preventing the "confused deputy problem" during cross-account access.
+- Why temporary credentials reduce the attack surface, even if the application code itself is compromised.
+- Debugging IAM policies from `AccessDenied` error messages.
 
 ## Sources
 
@@ -135,4 +137,4 @@ Remplacez `<ACCOUNT_A_ID>` et `<ACCOUNT_B_ID>` par vos propres Account ID.
 
 ---
 
-Projet réalisé dans le cadre d'un apprentissage pratique en cloud security. [LinkedIn](#)
+Project built as part of hands-on cloud security learning. [LinkedIn](#)
