@@ -6,7 +6,7 @@
 ![Status](https://img.shields.io/badge/Status-Working-1D9E75?style=flat)
 ![License](https://img.shields.io/badge/License-MIT-blue?style=flat)
 
-> How to give an AWS service access to resources in another account — without ever sharing a permanent access key.
+> How to give an AWS service access to resources in another account  without ever sharing a permanent access key.
 
 ## Table of Contents
 
